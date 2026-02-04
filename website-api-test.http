@@ -1,0 +1,196 @@
+### Website API Testing
+### Base URL: http://localhost:3000
+
+### 1. CREATE - Add a new website
+POST http://localhost:3000/api/websites
+Content-Type: application/json
+
+{
+    "name": "Google",
+    "url": "https://www.google.com",
+    "description": "Search engine website",
+    "category": "search",
+    "scrapeFrequency": "daily",
+    "isActive": true,
+    "metadata": {
+        "priority": "high",
+        "tags": ["search", "popular"]
+    }
+}
+
+###
+
+### 2. CREATE - Add another website
+POST http://localhost:3000/api/websites
+Content-Type: application/json
+
+{
+    "name": "GitHub",
+    "url": "https://github.com",
+    "description": "Code hosting platform",
+    "category": "development",
+    "scrapeFrequency": "weekly",
+    "isActive": true
+}
+
+###
+
+### 3. CREATE - Test duplicate URL (should fail)
+POST http://localhost:3000/api/websites
+Content-Type: application/json
+
+{
+    "name": "Google Duplicate",
+    "url": "https://www.google.com",
+    "description": "This should fail"
+}
+
+###
+
+### 4. READ - Get all websites
+GET http://localhost:3000/api/websites
+
+###
+
+### 5. READ - Get websites with pagination
+GET http://localhost:3000/api/websites?page=1&limit=5
+
+###
+
+### 6. READ - Get websites by category
+GET http://localhost:3000/api/websites?category=search
+
+###
+
+### 7. READ - Get active websites only
+GET http://localhost:3000/api/websites?isActive=true
+
+###
+
+### 8. READ - Get websites with sorting
+GET http://localhost:3000/api/websites?sortBy=name&sortOrder=asc
+
+###
+
+### 9. READ - Get a single website by ID (replace {id} with actual ID)
+GET http://localhost:3000/api/websites/{id}
+
+###
+
+### 10. UPDATE - Update a website (replace {id} with actual ID)
+PUT http://localhost:3000/api/websites/{id}
+Content-Type: application/json
+
+{
+    "name": "Google Search",
+    "description": "Updated description for Google",
+    "category": "search-engine",
+    "scrapeFrequency": "weekly",
+    "isActive": true
+}
+
+###
+
+### 11. UPDATE - Deactivate a website (replace {id} with actual ID)
+PUT http://localhost:3000/api/websites/{id}
+Content-Type: application/json
+
+{
+    "isActive": false
+}
+
+###
+
+### 12. PATCH - Update scrape data (replace {id} with actual ID)
+PATCH http://localhost:3000/api/websites/{id}/scrape
+Content-Type: application/json
+
+{
+    "scrapedData": {
+        "title": "Google",
+        "metaDescription": "Search the world's information",
+        "links": 150,
+        "images": 20,
+        "scrapedAt": "2026-02-04T18:00:00Z"
+    }
+}
+
+###
+
+### 15a. POST - Trigger manual scrape (STATIC mode)
+POST http://localhost:3000/api/websites/{id}/scrape-trigger
+Content-Type: application/json
+
+{
+    "mode": "static"
+}
+
+###
+
+### 15b. POST - Trigger manual scrape (SELENIUM mode)
+POST http://localhost:3000/api/websites/{id}/scrape-trigger
+Content-Type: application/json
+
+{
+    "mode": "selenium"
+}
+
+###
+
+### 13. DELETE - Delete a website (replace {id} with actual ID)
+DELETE http://localhost:3000/api/websites/{id}
+
+###
+
+### 14. DELETE - Bulk delete websites (replace IDs with actual IDs)
+POST http://localhost:3000/api/websites/bulk-delete
+Content-Type: application/json
+
+{
+    "ids": [
+        "65f1234567890abcdef12345",
+        "65f1234567890abcdef12346"
+    ]
+}
+
+###
+
+### Test Data - Create multiple websites for testing
+POST http://localhost:3000/api/websites
+Content-Type: application/json
+
+{
+    "name": "Amazon",
+    "url": "https://www.amazon.com",
+    "description": "E-commerce platform",
+    "category": "e-commerce",
+    "scrapeFrequency": "daily"
+}
+
+###
+
+POST http://localhost:3000/api/websites
+Content-Type: application/json
+
+{
+    "name": "Stack Overflow",
+    "url": "https://stackoverflow.com",
+    "description": "Developer Q&A platform",
+    "category": "development",
+    "scrapeFrequency": "on-demand"
+}
+
+###
+
+POST http://localhost:3000/api/websites
+Content-Type: application/json
+
+{
+    "name": "Reddit",
+    "url": "https://www.reddit.com",
+    "description": "Social news aggregation",
+    "category": "social",
+    "scrapeFrequency": "daily"
+}
+
+###
