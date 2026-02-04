@@ -1,16 +1,18 @@
 const express = require('express');
 const app = express();
 const bodyParser = require('body-parser');
+const cors = require('cors');
 const authRoutes = require('./routes/auth.js');
 const websiteRoutes = require('./routes/websites.js');
 require('./database'); // Initialize DB connection
 const port = 5000;
 
 // Middleware
+app.use(cors()); // Enable CORS for all origins
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-// CORS middleware (optional - enable if you need to call API from different origins)
+// CORS headers (extra layer)
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
