@@ -11,12 +11,17 @@ const Website = require('../models/Website');
 async function scrapeWebsiteTask(websiteId, mode = 'static') {
     console.log(`Starting scrapeWebsiteTask for ID: ${websiteId}, Mode: ${mode}`);
     return new Promise((resolve, reject) => {
-        const pythonPath = 'python'; // Or path to your venv python
+        const pythonPath = 'D:\\Programme\\python.exe'; // Use specific python path with dependencies
         const scriptPath = path.join(__dirname, '../python_scraper/scraper.py');
 
         console.log(`Executing Python scraper for ${websiteId} in ${mode} mode...`);
 
         const pythonProcess = spawn(pythonPath, [scriptPath, websiteId, mode]);
+
+        pythonProcess.on('error', (err) => {
+            console.error('Failed to start Python process:', err);
+            reject(new Error(`Failed to start Python process: ${err.message}`));
+        });
 
         let output = '';
         let errorOutput = '';
