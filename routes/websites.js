@@ -262,10 +262,13 @@ router.post('/bulk-delete', async (req, res) => {
     }
 });
 
+const { sendEmailNotification, sendWhatsAppNotification } = require('../services/notificationService');
+
 // TRIGGER SCRAPE: Manually start a scrape for a specific website
 router.post('/:id/scrape-trigger', async (req, res) => {
     try {
         const websiteId = req.params.id;
+        const { mode = 'static', notifyEmail, notifyWhatsApp, emailTo, phoneTo } = req.body;
 
         // Find website first to ensure it exists
         const website = await Website.findById(websiteId);
@@ -274,11 +277,40 @@ router.post('/:id/scrape-trigger', async (req, res) => {
         }
 
         // Start scraping task
-        const mode = req.body.mode || 'static';
         const updatedWebsite = await scrapeWebsiteTask(websiteId, mode);
+        const latestData = updatedWebsite.scrapedData;
+
+        // Optional Notifications
+        let notificationStatus = { email: 'none', whatsapp: 'none' };
+
+        if (notifyEmail && emailTo) {
+            try {
+                await sendEmailNotification(emailTo, `Scraping Result: ${website.name}`, {
+                    ...latestData,
+                    url: updatedWebsite.url,
+                    domain: updatedWebsite.url.split('/')[2]
+                });
+                notificationStatus.email = 'sent';
+            } catch (err) {
+                notificationStatus.email = 'failed: ' + err.message;
+            }
+        }
+
+        if (notifyWhatsApp && phoneTo) {
+            try {
+                await sendWhatsAppNotification(phoneTo, {
+                    ...latestData,
+                    url: updatedWebsite.url
+                });
+                notificationStatus.whatsapp = 'sent';
+            } catch (err) {
+                notificationStatus.whatsapp = 'failed: ' + err.message;
+            }
+        }
 
         res.json({
             message: `Scraping (${mode}) completed successfully`,
+            notifications: notificationStatus,
             website: updatedWebsite
         });
     } catch (error) {

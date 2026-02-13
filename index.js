@@ -1,9 +1,11 @@
+require('dotenv').config();
 const express = require('express');
 const app = express();
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const authRoutes = require('./routes/auth.js');
 const websiteRoutes = require('./routes/websites.js');
+const productRoutes = require('./routes/products.js');
 require('./database'); // Initialize DB connection
 const port = 5000;
 
@@ -23,6 +25,7 @@ app.use((req, res, next) => {
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/websites', websiteRoutes);
+app.use('/api/products', productRoutes);
 
 // API Info endpoint
 app.get('/', (req, res) => {
@@ -43,6 +46,12 @@ app.get('/', (req, res) => {
                 triggerScrape: 'POST /api/websites/:id/scrape-trigger',
                 delete: 'DELETE /api/websites/:id',
                 bulkDelete: 'POST /api/websites/bulk-delete'
+            },
+            products: {
+                getAll: 'GET /api/products',
+                getById: 'GET /api/products/:id',
+                query: 'GET /api/products?q=...&category=...&domain=...',
+                share: 'POST /api/products/:id/share { "type": "whatsapp", "destination": "+216..." }'
             }
         }
     });

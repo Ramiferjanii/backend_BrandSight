@@ -11,10 +11,23 @@ const Website = require('../models/Website');
 async function scrapeWebsiteTask(websiteId, mode = 'static') {
     console.log(`Starting scrapeWebsiteTask for ID: ${websiteId}, Mode: ${mode}`);
     return new Promise((resolve, reject) => {
-        const pythonPath = 'D:\\Programme\\python.exe'; // Use specific python path with dependencies
+        // Use a more portable way to find Python
+        const fs = require('fs');
+        let pythonPath = 'python'; // Default system fallback
+
+        // Potential paths for virtual environment python
+        const venvPath = path.join(__dirname, '../../.venv/Scripts/python.exe');
+        const venvPathUnix = path.join(__dirname, '../../.venv/bin/python');
+
+        if (fs.existsSync(venvPath)) {
+            pythonPath = venvPath;
+        } else if (fs.existsSync(venvPathUnix)) {
+            pythonPath = venvPathUnix;
+        }
+
         const scriptPath = path.join(__dirname, '../python_scraper/scraper.py');
 
-        console.log(`Executing Python scraper for ${websiteId} in ${mode} mode...`);
+        console.log(`Executing Python scraper using: ${pythonPath} for ID: ${websiteId}`);
 
         const pythonProcess = spawn(pythonPath, [scriptPath, websiteId, mode]);
 
