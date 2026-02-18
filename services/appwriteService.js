@@ -4,9 +4,13 @@ require('dotenv').config();
 const client = new sdk.Client();
 
 if (process.env.APPWRITE_ENDPOINT && process.env.APPWRITE_PROJECT_ID && process.env.APPWRITE_API_KEY) {
+    const projectId = process.env.APPWRITE_PROJECT_ID;
+    console.log(`[Appwrite Service] Initializing with Project ID: ${projectId.substring(0, 5)}...${projectId.substring(projectId.length - 3)}`);
+    console.log(`[Appwrite Service] Endpoint: ${process.env.APPWRITE_ENDPOINT}`);
+    
     client
         .setEndpoint(process.env.APPWRITE_ENDPOINT)
-        .setProject(process.env.APPWRITE_PROJECT_ID)
+        .setProject(projectId)
         .setKey(process.env.APPWRITE_API_KEY);
 } else {
     console.warn("⚠️ Appwrite environment variables are missing. Please check .env file.");
