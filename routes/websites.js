@@ -1,324 +1,322 @@
 const express = require('express');
 const router = express.Router();
-const Website = require('../models/Website');
+const { databases, ID, client } = require('../services/appwriteService');
 const { scrapeWebsiteTask } = require('../services/scraperService');
+const { Query } = require('node-appwrite');
+const auth = require('../middleware/auth'); // Import auth middleware
 
-// CREATE: Add a new website to the database
-router.post('/', async (req, res) => {
+const DATABASE_ID = process.env.APPWRITE_DB_ID;
+const WEBSITES_COLLECTION = process.env.APPWRITE_COLLECTION_WEBSITES;
+const PRODUCTS_COLLECTION = process.env.APPWRITE_COLLECTION_PRODUCTS;
+
+// Helper to format Appwrite document to our API format
+const formatWebsite = (doc) => ({
+    id: doc.$id,
+    name: doc.name,
+    url: doc.url,
+    description: doc.description,
+    category: doc.category,
+    scrapeFrequency: doc.scrapeFrequency,
+    isActive: doc.isActive,
+    lastScraped: doc.lastScraped,
+    lastScrapeStatus: doc.lastScrapeStatus || 'idle',
+    scrapedData: doc.scrapedData ? JSON.parse(doc.scrapedData) : {},
+    metadata: doc.metadata ? JSON.parse(doc.metadata) : {},
+    userId: doc.userId, // Include userId in output
+    createdAt: doc.$createdAt,
+    updatedAt: doc.$updatedAt
+});
+
+// CREATE: Add a new website
+router.post('/', auth, async (req, res) => {
     try {
         const { name, url, description, category, scrapeFrequency, isActive, metadata } = req.body;
 
-        // Validate required fields
         if (!name || !url) {
-            return res.status(400).json({
-                error: 'Name and URL are required fields'
-            });
+            return res.status(400).json({ error: 'Name and URL are required fields' });
         }
 
-        // Check if website with this URL already exists
-        const existingWebsite = await Website.findOne({ url });
-        if (existingWebsite) {
-            return res.status(409).json({
-                error: 'A website with this URL already exists',
-                existingWebsite: {
-                    id: existingWebsite._id,
-                    name: existingWebsite.name,
-                    url: existingWebsite.url
-                }
-            });
+        // duplicate check by URL (scoped to USER)
+        const check = await databases.listDocuments(
+            DATABASE_ID, 
+            WEBSITES_COLLECTION, 
+            [
+                Query.equal('url', url),
+                Query.equal('userId', req.user.id) // Check only user's websites
+            ]
+        );
+
+        if (check.total > 0) {
+            return res.status(409).json({ error: 'Website with this URL already exists' });
         }
 
-        // Create new website
-        const website = new Website({
+        const payload = {
             name,
             url,
             description,
-            category,
-            scrapeFrequency,
-            isActive,
-            metadata
-        });
+            category: category || 'general',
+            scrapeFrequency: scrapeFrequency || 'on-demand',
+            isActive: isActive !== undefined ? isActive : true,
+            userId: req.user.id // Associate with user
+        };
 
-        const savedWebsite = await website.save();
+        const doc = await databases.createDocument(
+            DATABASE_ID,
+            WEBSITES_COLLECTION,
+            ID.unique(),
+            payload
+        );
 
         res.status(201).json({
             message: 'Website created successfully',
-            website: savedWebsite
+            website: formatWebsite(doc)
         });
     } catch (error) {
         console.error('Error creating website:', error);
-        res.status(500).json({
-            error: 'Failed to create website',
-            details: error.message
-        });
+        res.status(500).json({ error: error.message });
     }
 });
 
-// READ: Get all websites from the database
-router.get('/', async (req, res) => {
+// READ: Get all websites (Scoped to User)
+router.get('/', auth, async (req, res) => {
     try {
-        const {
-            category,
-            isActive,
-            scrapeFrequency,
-            page = 1,
-            limit = 10,
-            sortBy = 'createdAt',
-            sortOrder = 'desc'
-        } = req.query;
+        const { category, isActive, page, limit } = req.query;
+        
+        const pLimit = parseInt(limit) || 10;
+        const pPage = parseInt(page) || 1;
+        const pOffset = (pPage - 1) * pLimit;
 
-        // Build filter object
-        const filter = {};
-        if (category) filter.category = category;
-        if (isActive !== undefined) filter.isActive = isActive === 'true';
-        if (scrapeFrequency) filter.scrapeFrequency = scrapeFrequency;
+        let queries = [
+            Query.limit(pLimit),
+            Query.offset(pOffset),
+            Query.orderDesc('$createdAt'),
+            Query.equal('userId', req.user.id)
+        ];
 
-        // Calculate pagination
-        const skip = (parseInt(page) - 1) * parseInt(limit);
-        const sort = { [sortBy]: sortOrder === 'asc' ? 1 : -1 };
+        if (category && category.trim()) queries.push(Query.equal('category', category.trim()));
+        if (isActive !== undefined) queries.push(Query.equal('isActive', isActive === 'true'));
 
-        // Get websites with pagination
-        const websites = await Website.find(filter)
-            .sort(sort)
-            .skip(skip)
-            .limit(parseInt(limit));
+        console.log(`DEBUG - Appwrite Websites Query: DB=${DATABASE_ID} COL=${WEBSITES_COLLECTION} User=${req.user.id}`);
 
-        // Get total count for pagination
-        const total = await Website.countDocuments(filter);
+        const result = await databases.listDocuments(DATABASE_ID, WEBSITES_COLLECTION, queries);
 
         res.json({
-            websites,
+            websites: result.documents.map(formatWebsite),
             pagination: {
-                total,
-                page: parseInt(page),
-                limit: parseInt(limit),
-                totalPages: Math.ceil(total / parseInt(limit))
+                total: result.total,
+                page: pPage,
+                limit: pLimit,
+                totalPages: Math.ceil(result.total / pLimit)
             }
         });
     } catch (error) {
-        console.error('Error fetching websites:', error);
-        res.status(500).json({
-            error: 'Failed to fetch websites',
-            details: error.message
-        });
+        console.error('--- APPWRITE WEBSITES ERROR ---');
+        console.error('Message:', error.message);
+        if (error.response) console.error('Response:', JSON.stringify(error.response));
+        
+        // Detect missing index error
+        if (error.type === 'index_not_found' || (error.message && error.message.includes('Index not found'))) {
+             console.error("CRITICAL: Missing Appwrite Index. Please run 'node backend/fix-indices.js'");
+             return res.status(500).json({ error: "Database Configuration Error: Missing Index", details: "The 'userId' or 'category' index is missing in Appwrite." });
+        }
+
+        res.status(500).json({ error: error.message, details: error.response?.message });
     }
 });
 
-// READ: Get a single website by ID
-router.get('/:id', async (req, res) => {
+// READ: Get single website
+router.get('/:id', auth, async (req, res) => {
     try {
-        const website = await Website.findById(req.params.id);
-
-        if (!website) {
-            return res.status(404).json({
-                error: 'Website not found'
-            });
+        const doc = await databases.getDocument(DATABASE_ID, WEBSITES_COLLECTION, req.params.id);
+        
+        // Check ownership
+        if (doc.userId && doc.userId !== req.user.id) {
+            return res.status(403).json({ error: 'Access denied' });
         }
 
-        res.json({ website });
+        res.json({ website: formatWebsite(doc) });
     } catch (error) {
-        console.error('Error fetching website:', error);
-        res.status(500).json({
-            error: 'Failed to fetch website',
-            details: error.message
-        });
+        res.status(404).json({ error: 'Website not found' });
     }
 });
 
-// UPDATE: Update a website in the database
-router.put('/:id', async (req, res) => {
+// UPDATE: Update a website
+router.put('/:id', auth, async (req, res) => {
     try {
-        const { name, url, description, category, scrapeFrequency, isActive, lastScraped, scrapedData, metadata } = req.body;
-
-        // Check if website exists
-        const website = await Website.findById(req.params.id);
-        if (!website) {
-            return res.status(404).json({
-                error: 'Website not found'
-            });
+        // Verify ownership first
+        const existing = await databases.getDocument(DATABASE_ID, WEBSITES_COLLECTION, req.params.id);
+        if (existing.userId && existing.userId !== req.user.id) {
+            return res.status(403).json({ error: 'Access denied' });
         }
 
-        // If URL is being changed, check if new URL already exists
-        if (url && url !== website.url) {
-            const existingWebsite = await Website.findOne({ url });
-            if (existingWebsite) {
-                return res.status(409).json({
-                    error: 'A website with this URL already exists'
-                });
-            }
-        }
+        const { name, url, description, category, scrapeFrequency, isActive, metadata } = req.body;
+        
+        const updates = {};
+        if (name) updates.name = name;
+        if (url) updates.url = url;
+        if (description) updates.description = description;
+        if (category) updates.category = category;
+        if (scrapeFrequency) updates.scrapeFrequency = scrapeFrequency;
+        if (isActive !== undefined) updates.isActive = isActive;
 
-        // Update fields
-        if (name !== undefined) website.name = name;
-        if (url !== undefined) website.url = url;
-        if (description !== undefined) website.description = description;
-        if (category !== undefined) website.category = category;
-        if (scrapeFrequency !== undefined) website.scrapeFrequency = scrapeFrequency;
-        if (isActive !== undefined) website.isActive = isActive;
-        if (lastScraped !== undefined) website.lastScraped = lastScraped;
-        if (scrapedData !== undefined) website.scrapedData = scrapedData;
-        if (metadata !== undefined) website.metadata = metadata;
-
-        const updatedWebsite = await website.save();
+        const doc = await databases.updateDocument(
+            DATABASE_ID,
+            WEBSITES_COLLECTION,
+            req.params.id,
+            updates
+        );
 
         res.json({
             message: 'Website updated successfully',
-            website: updatedWebsite
+            website: formatWebsite(doc)
         });
     } catch (error) {
-        console.error('Error updating website:', error);
-        res.status(500).json({
-            error: 'Failed to update website',
-            details: error.message
-        });
+        res.status(500).json({ error: error.message });
     }
 });
 
-// PATCH: Partially update a website (for updating scrape data)
-router.patch('/:id/scrape', async (req, res) => {
+// DELETE
+router.delete('/:id', auth, async (req, res) => {
     try {
-        const { scrapedData } = req.body;
-
-        const website = await Website.findByIdAndUpdate(
-            req.params.id,
-            {
-                scrapedData,
-                lastScraped: new Date(),
-                updatedAt: new Date()
-            },
-            { new: true }
-        );
-
-        if (!website) {
-            return res.status(404).json({
-                error: 'Website not found'
-            });
+        // Verify ownership
+        const existing = await databases.getDocument(DATABASE_ID, WEBSITES_COLLECTION, req.params.id);
+        if (existing.userId && existing.userId !== req.user.id) {
+            return res.status(403).json({ error: 'Access denied' });
         }
 
-        res.json({
-            message: 'Scrape data updated successfully',
-            website
-        });
+        await databases.deleteDocument(DATABASE_ID, WEBSITES_COLLECTION, req.params.id);
+        res.json({ message: 'Website deleted successfully' });
     } catch (error) {
-        console.error('Error updating scrape data:', error);
-        res.status(500).json({
-            error: 'Failed to update scrape data',
-            details: error.message
-        });
+        res.status(500).json({ error: error.message });
     }
 });
 
-// DELETE: Delete a website from the database
-router.delete('/:id', async (req, res) => {
-    try {
-        const website = await Website.findByIdAndDelete(req.params.id);
-
-        if (!website) {
-            return res.status(404).json({
-                error: 'Website not found'
-            });
-        }
-
-        res.json({
-            message: 'Website deleted successfully',
-            deletedWebsite: {
-                id: website._id,
-                name: website.name,
-                url: website.url
-            }
-        });
-    } catch (error) {
-        console.error('Error deleting website:', error);
-        res.status(500).json({
-            error: 'Failed to delete website',
-            details: error.message
-        });
-    }
-});
-
-// DELETE: Delete multiple websites
-router.post('/bulk-delete', async (req, res) => {
-    try {
-        const { ids } = req.body;
-
-        if (!ids || !Array.isArray(ids) || ids.length === 0) {
-            return res.status(400).json({
-                error: 'Please provide an array of website IDs to delete'
-            });
-        }
-
-        const result = await Website.deleteMany({ _id: { $in: ids } });
-
-        res.json({
-            message: 'Websites deleted successfully',
-            deletedCount: result.deletedCount
-        });
-    } catch (error) {
-        console.error('Error deleting websites:', error);
-        res.status(500).json({
-            error: 'Failed to delete websites',
-            details: error.message
-        });
-    }
-});
-
-const { sendEmailNotification, sendWhatsAppNotification } = require('../services/notificationService');
-
-// TRIGGER SCRAPE: Manually start a scrape for a specific website
-router.post('/:id/scrape-trigger', async (req, res) => {
+// TRIGGER SCRAPE
+router.post('/:id/scrape-trigger', auth, async (req, res) => {
     try {
         const websiteId = req.params.id;
-        const { mode = 'static', notifyEmail, notifyWhatsApp, emailTo, phoneTo } = req.body;
+        const { mode = 'static', url, filters } = req.body;
 
-        // Find website first to ensure it exists
-        const website = await Website.findById(websiteId);
-        if (!website) {
-            return res.status(404).json({ error: 'Website not found' });
+        // Verify existence and ownership
+        const website = await databases.getDocument(DATABASE_ID, WEBSITES_COLLECTION, websiteId);
+        if (website.userId && website.userId !== req.user.id) {
+            return res.status(403).json({ error: 'Access denied' });
         }
 
-        // Start scraping task
-        const updatedWebsite = await scrapeWebsiteTask(websiteId, mode);
-        const latestData = updatedWebsite.scrapedData;
+        // Determine target URL: Custom URL > Website Default URL
+        const targetUrl = url && url.trim() ? url.trim() : website.url;
 
-        // Optional Notifications
-        let notificationStatus = { email: 'none', whatsapp: 'none' };
-
-        if (notifyEmail && emailTo) {
-            try {
-                await sendEmailNotification(emailTo, `Scraping Result: ${website.name}`, {
-                    ...latestData,
-                    url: updatedWebsite.url,
-                    domain: updatedWebsite.url.split('/')[2]
-                });
-                notificationStatus.email = 'sent';
-            } catch (err) {
-                notificationStatus.email = 'failed: ' + err.message;
-            }
+        if (!targetUrl || !targetUrl.trim()) {
+            return res.status(400).json({ error: 'Website URL is missing or invalid' });
         }
 
-        if (notifyWhatsApp && phoneTo) {
-            try {
-                await sendWhatsAppNotification(phoneTo, {
-                    ...latestData,
-                    url: updatedWebsite.url
-                });
-                notificationStatus.whatsapp = 'sent';
-            } catch (err) {
-                notificationStatus.whatsapp = 'failed: ' + err.message;
-            }
+        console.log(`Triggering Scrape for ${website.name}. URL: ${targetUrl}, Mode: ${mode}`);
+        if (filters) {
+            console.log(`Filters applied:`, filters);
         }
 
-        res.json({
-            message: `Scraping (${mode}) completed successfully`,
-            notifications: notificationStatus,
-            website: updatedWebsite
+        // Run Task Asynchronously with filters AND userId
+        scrapeWebsiteTask(websiteId, mode, targetUrl.trim(), filters, req.user.id)
+            .then(() => console.log(`Scraping task for ${websiteId} completed.`))
+            .catch(err => console.error(`Scraping task for ${websiteId} failed:`, err));
+
+        res.status(202).json({
+            message: `Scraping started in background. Status will update shortly.`,
+            status: 'in-progress',
+            filters: filters || null
         });
     } catch (error) {
-        console.error('Scraping error:', error);
-        res.status(500).json({
-            error: 'Scraping failed',
-            details: error.message
-        });
+        console.error('Scrape trigger error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// SEED: Default Websites & Schema Migration
+router.post('/seed', async (req, res) => {
+    try {
+        const defaults = [
+            {
+                name: "Tunisianet",
+                url: "https://www.tunisianet.com.tn",
+                category: "Electronics",
+                description: "Vente PC portable Tunisie, ordinateur de bureau, Smartphones...",
+                scrapeFrequency: "daily"
+            },
+            {
+                name: "MyTek",
+                url: "https://www.mytek.tn",
+                category: "Electronics",
+                description: "Vente en ligne de PC portables, Smartphones, Electroménager...",
+                scrapeFrequency: "daily"
+            },
+            {
+                name: "Wiki",
+                url: "https://www.wiki.tn",
+                category: "Electronics",
+                description: "Vente en ligne Informatique, High Tech, Électroménager...",
+                scrapeFrequency: "daily"
+            }
+        ];
+
+        const results = [];
+
+        // 1. Ensure Schema Attributes Exist
+        try {
+             // We reuse the existing database client method if possible, or fallback
+             if (databases.createFloatAttribute) {
+                 const PRODUCTS = process.env.APPWRITE_COLLECTION_PRODUCTS;
+                 
+                 await databases.createFloatAttribute(DATABASE_ID, PRODUCTS, 'priceAmount', false).catch(() => {});
+                 await databases.createStringAttribute(DATABASE_ID, PRODUCTS, 'category', 255, false).catch(() => {});
+                 await databases.createStringAttribute(DATABASE_ID, PRODUCTS, 'name', 255, true).catch(() => {});
+                 await databases.createStringAttribute(DATABASE_ID, PRODUCTS, 'price', 255, false).catch(() => {});
+                 await databases.createStringAttribute(DATABASE_ID, PRODUCTS, 'reference', 255, false).catch(() => {});
+                 await databases.createStringAttribute(DATABASE_ID, PRODUCTS, 'overview', 5000, false).catch(() => {});
+                 await databases.createStringAttribute(DATABASE_ID, PRODUCTS, 'url', 1000, true).catch(() => {});
+                 await databases.createStringAttribute(DATABASE_ID, PRODUCTS, 'domain', 255, false).catch(() => {});
+                 await databases.createStringAttribute(DATABASE_ID, PRODUCTS, 'image', 1000, false).catch(() => {});
+                 await databases.createStringAttribute(DATABASE_ID, PRODUCTS, 'websiteId', 255, true).catch(() => {});
+                 
+                 // NEW: userId attribute for Data Isolation
+                 await databases.createStringAttribute(DATABASE_ID, PRODUCTS, 'userId', 255, false).catch(() => {});
+                 await databases.createStringAttribute(DATABASE_ID, WEBSITES_COLLECTION, 'userId', 255, false).catch(() => {});
+                 
+                 await databases.createStringAttribute(DATABASE_ID, WEBSITES_COLLECTION, 'lastScrapeStatus', 50, false).catch(() => {});
+             }
+        } catch (e) {
+            console.log("Schema migration note: " + e.message);
+        }
+
+        // 2. Seed Websites (Global seed)
+        for (const site of defaults) {
+            const check = await databases.listDocuments(
+                DATABASE_ID, 
+                WEBSITES_COLLECTION, 
+                [Query.equal('url', site.url)]
+            );
+
+            if (check.total === 0) {
+                const doc = await databases.createDocument(
+                    DATABASE_ID,
+                    WEBSITES_COLLECTION,
+                    ID.unique(),
+                    {
+                        ...site,
+                        isActive: true,
+                        scrapeFrequency: 'daily'
+                        // Global seed has no userId
+                    }
+                );
+                results.push({ name: site.name, status: 'created', id: doc.$id });
+            } else {
+                results.push({ name: site.name, status: 'exists', id: check.documents[0].$id });
+            }
+        }
+
+        res.json({ message: 'Seeding completed', results });
+    } catch (error) {
+        console.error('Seeding error:', error);
+        res.status(500).json({ error: error.message });
     }
 });
 

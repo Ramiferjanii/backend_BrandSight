@@ -1,75 +1,40 @@
 const express = require('express');
 const router = express.Router();
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const User = require('../models/User'); // Import Mongoose Model
-const { validateRegister, validateLogin } = require('../middleware/validation.js');
+const { users, Query } = require('../services/appwriteService');
 
-const SECRET_KEY = "your_super_secret_key_change_this_in_production";
+// Debug Middleware to trace Auth Requests
+router.use((req, res, next) => {
+    console.log(`[AUTH ROUTE] ${req.method} ${req.originalUrl}`);
+    next();
+});
 
-router.post('/register', validateRegister, async (req, res) => {
-    const { name, email, password } = req.body;
+// Endpoint for frontend to fetch UserID by email (needed for existing user OTP flow)
+router.post('/get-user-id', async (req, res) => {
+    console.log(`[AUTH] Lookup request for: ${req.body.email}`);
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: "Email is required" });
 
     try {
-        // Check if user already exists
-        const existingUser = await User.findOne({ email });
-        if (existingUser) {
-            return res.status(400).json({ "error": "Email already exists" });
+        const response = await users.list([
+            Query.equal('email', email)
+        ]);
+
+        if (response.users.length > 0) {
+            console.log(`[AUTH] User found: ${response.users[0].$id}`);
+            return res.json({ userId: response.users[0].$id, exists: true });
+        } else {
+            console.log(`[AUTH] User not found for email: ${email}`);
+            return res.status(404).json({ error: "User not found", exists: false });
         }
-
-        const salt = bcrypt.genSaltSync(10);
-        const hash = bcrypt.hashSync(password, salt);
-
-        const newUser = await User.create({
-            name,
-            email,
-            password: hash
-        });
-
-        res.status(201).json({
-            "message": "User registered successfully",
-            "data": {
-                id: newUser._id,
-                name: newUser.name,
-                email: newUser.email
-            }
-        });
-
     } catch (err) {
-        return res.status(400).json({ "error": err.message });
+        console.error("[AUTH] Error looking up user:", err);
+        return res.status(500).json({ error: err.message });
     }
 });
 
-router.post('/login', validateLogin, async (req, res) => {
-    const { email, password } = req.body;
-
-    try {
-        const user = await User.findOne({ email });
-
-        if (!user) {
-            return res.status(400).json({ "error": "Invalid email or password" });
-        }
-
-        const validPassword = bcrypt.compareSync(password, user.password);
-        if (!validPassword) {
-            return res.status(400).json({ "error": "Invalid email or password" });
-        }
-
-        // Use _id for MongoDB documents
-        const token = jwt.sign({ id: user._id, email: user.email }, SECRET_KEY, { expiresIn: '1h' });
-
-        res.json({
-            "message": "Login successful",
-            "token": token,
-            "user": {
-                id: user._id,
-                name: user.name,
-                email: user.email
-            }
-        });
-    } catch (err) {
-        return res.status(500).json({ "error": "Internal Server Error" });
-    }
+// Test Endpoint verify route loading
+router.get('/test', (req, res) => {
+    res.json({ message: "Auth Routes working on 5002", timestamp: new Date().toISOString() });
 });
 
 module.exports = router;

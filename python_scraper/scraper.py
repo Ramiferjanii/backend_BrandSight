@@ -7,13 +7,26 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
-from pymongo import MongoClient
-from bson import ObjectId
 import datetime
 import urllib.parse
+import re
+import os
+from dotenv import load_dotenv
+from appwrite.client import Client
+from appwrite.services.databases import Databases
+from appwrite.query import Query
+from appwrite.id import ID
+
+# Load environment variables
+load_dotenv(os.path.join(os.path.dirname(__file__), '../.env'))
 
 # Configuration
-MONGO_URI = "mongodb://127.0.0.1:27017/express-demo"
+APPWRITE_ENDPOINT = os.getenv('APPWRITE_ENDPOINT')
+APPWRITE_PROJECT_ID = os.getenv('APPWRITE_PROJECT_ID')
+APPWRITE_API_KEY = os.getenv('APPWRITE_API_KEY')
+APPWRITE_DB_ID = os.getenv('APPWRITE_DB_ID')
+APPWRITE_COLLECTION_WEBSITES = os.getenv('APPWRITE_COLLECTION_WEBSITES', 'websites')
+APPWRITE_COLLECTION_PRODUCTS = os.getenv('APPWRITE_COLLECTION_PRODUCTS', 'products')
 
 SITE_CONFIGS = {
     "tunisianet.com.tn": {
@@ -39,12 +52,131 @@ SITE_CONFIGS = {
     }
 }
 
-def get_db():
+LIST_CONFIGS = {
+    "tunisianet.com.tn": {
+        "card": ".product-miniature",
+        "name": ".product-title a",
+        "price": ".price",
+        "url": ".product-title a",
+        "img": ".product-thumbnail img",
+        "reference": ".product-reference",
+        "next": "a.next"
+    },
+    "mytek.tn": {
+        "card": ".product-container",
+        "name": ".product-item-link",
+        "price": ".price-box",
+        "url": ".product-item-link",
+        "img": "img",
+        "reference": ".sku",
+        "next": "a.action.next"
+    },
+    "wiki.tn": {
+        "card": ".product-miniature, .product-container, .product-type-simple, .product, .product-card, .brxe-loop-item", 
+        "name": ".product-title a, .product-name, .woocommerce-loop-product__title, .product-card__title a, h3.title a",
+        "price": ".price, .product-price, .product-price-and-shipping, .product-card__price, .brxe-product-price",
+        "url": ".product-title a, .product-name, .woocommerce-loop-product__link, .product-card__title a",
+        "img": "img",
+        "reference": ".sku, .product-reference",
+        "next": "a.next, .brxe-pagination a.next"
+    }
+}
+
+def parse_price(price_str):
+    """Extracts numeric value from price string. Handles TND format (e.g. '1,099,000 DT' = 1099.000)."""
+    if not price_str: return 0.0
     try:
-        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-        return client['express-demo']
+        # Pre-clean: remove all whitespace including non-breaking spaces
+        clean_str = re.sub(r'[\s\u00A0\u1680\u180E\u2000-\u200B\u202F\u205F\u3000]', '', price_str.strip())
+        
+        # Remove non-numeric except commas and dots
+        clean = re.sub(r'[^\d.,]', '', clean_str)
+        if not clean: return 0.0
+        
+        # Count commas and dots
+        comma_count = clean.count(',')
+        dot_count = clean.count('.')
+        
+        if comma_count >= 1 and dot_count >= 1:
+            # Format: 1.099,000 or 1,099.00
+            if clean.rfind(',') > clean.rfind('.'):
+                # , is decimal: 1.099,000 -> 1099.000
+                clean = clean.replace('.', '').replace(',', '.')
+            else:
+                # . is decimal: 1,099.00 -> 1099.00
+                clean = clean.replace(',', '')
+        elif comma_count > 0:
+            # Single or many commas
+            parts = clean.split(',')
+            if len(parts) == 2 and len(parts[1]) == 3:
+                # TND Millimes: 849,000 -> 849.0
+                clean = parts[0] + '.' + parts[1]
+            else:
+                # Standard decimal or thousand separator
+                if comma_count == 1:
+                    clean = clean.replace(',', '.')
+                else:
+                    clean = clean.replace(',', '')
+        elif dot_count > 0:
+            # Only dots
+            if dot_count > 1:
+                clean = clean.replace('.', '')
+            else:
+                parts = clean.split('.')
+                if len(parts[1]) == 3:
+                    # 849.000 remains 849.000
+                    pass
+                else:
+                    # 19.99 remains 19.99
+                    pass
+
+        val = float(clean)
+        
+        # Final safety check for TND (if value is in millimes like 1150000 instead of 1150.0)
+        if val > 50000:
+            val = val / 1000.0
+            
+        return val
+    except:
+        pass
+    return 0.0
+
+def extract_reference_from_url(url, domain):
+    if not url: return None
+    ref = None
+    try:
+        clean_url = url.split('?')[0]
+        if "mytek.tn" in domain:
+            filename = clean_url.split('/')[-1]
+            slug = filename.replace('.html', '')
+            parts = slug.split('-')
+            if parts:
+                candidate = parts[-1]
+                if len(candidate) <= 2 and len(parts) > 1:
+                    candidate = parts[-2] + "-" + candidate
+                ref = candidate
+        elif "wiki.tn" in domain:
+            filename = clean_url.split('/')[-1]
+            slug = filename.replace('.html', '')
+            parts = slug.split('-')
+            for p in reversed(parts):
+                if any(c.isdigit() for c in p) and any(c.isalpha() for c in p) and len(p) > 5:
+                    ref = p
+                    break
+    except:
+        pass
+    return ref
+
+def get_appwrite_client():
+    try:
+        client = Client()
+        client.set_endpoint(APPWRITE_ENDPOINT)
+        client.set_project(APPWRITE_PROJECT_ID)
+        client.set_key(APPWRITE_API_KEY)
+        databases = Databases(client)
+        return databases
     except Exception as e:
-        print(f"Error connecting to MongoDB: {e}", file=sys.stderr)
+        print(f"Error connecting to Appwrite: {e}", file=sys.stderr)
         return None
 
 def extract_specific_data(soup, domain):
@@ -53,28 +185,20 @@ def extract_specific_data(soup, domain):
         if d in domain:
             config = cfg
             break
-    
-    if not config:
-        return None
-    
+    if not config: return None
     data = {}
-    
-    # --- 1. PRICE (High Priority: Metadata) ---
-    # Prices in e-commerce are best fetched from Meta tags or JSON-LD to avoid related products
     meta_price = soup.find("meta", attrs={"property": "product:price:amount"}) or \
                  soup.find("meta", attrs={"itemprop": "price"}) or \
                  soup.find("meta", attrs={"name": "twitter:data1"})
-    
     if meta_price and meta_price.get("content"):
         val = meta_price.get("content").strip()
+        data["priceAmount"] = parse_price(val)
         if any(c.isdigit() for c in val):
-            # Format price nicely if it's just a number
             if "," not in val and "." not in val and len(val) > 4:
-                 data["price"] = f"{val[:-3]} {val[-3:]} DT" # 849000 -> 849 000 DT
+                 data["price"] = f"{val[:-3]} {val[-3:]} DT"
             else:
                  data["price"] = f"{val} DT"
 
-    # --- 2. REFERENCE / SKU (Anchor) ---
     ref_el = None
     for s in config.get("reference", []):
         ref_el = soup.select_one(s)
@@ -82,7 +206,6 @@ def extract_specific_data(soup, domain):
             data["reference"] = ref_el.get_text().strip()
             break
             
-    # --- 3. NAME ---
     name_el = None
     for s in config.get("name", []):
         name_el = soup.select_one(s)
@@ -90,206 +213,285 @@ def extract_specific_data(soup, domain):
             data["name"] = name_el.get_text().strip()
             break
 
-    # Anchor area for remaining fields
     anchor = ref_el or name_el
-    
-    # --- 4. OTHER FIELDS ---
     for key in ["price", "overview", "category"]:
-        if key in data and data[key] != "Not found": continue # Already found via metadata
-        
-        # Try local search around anchor
+        if key in data and data[key] != "Not found": continue
         if anchor:
             curr = anchor
-            for _ in range(6): # Bubble up 6 levels
+            for _ in range(6):
                 for selector in config.get(key, []):
                     found = curr.select_one(selector)
                     if found and found.get_text().strip():
                         val = found.get_text().strip()
                         if key == "price" and (len(val) > 25 or not any(c.isdigit() for c in val)):
                             continue
+                        if key == "price":
+                            data["priceAmount"] = parse_price(val)
                         data[key] = val
                         break
                 if key in data: break
                 curr = curr.parent
                 if not curr: break
         
-        # Global fallback
         if key not in data or data[key] == "Not found":
             for selector in config.get(key, []):
                 found = soup.select_one(selector)
                 if found and found.get_text().strip():
-                    data[key] = found.get_text().strip()
+                    val = found.get_text().strip()
+                    if key == "price":
+                        data["priceAmount"] = parse_price(val)
+                    data[key] = val
                     break
-
-    # Fill defaults
     for key in ["name", "price", "reference", "overview", "category"]:
-        if key not in data:
-            data[key] = "Not found"
-            
+        if key not in data: data[key] = "Not found"
     return data
 
-def scrape_static(url):
-    print(f"Using Static Scraper for: {url}", file=sys.stderr)
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9,fr;q=0.8',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache',
-    }
+def extract_list_data(soup, domain, min_price=None, max_price=None, name_filter=None, reference_filter=None):
+    config = None
+    for d, cfg in LIST_CONFIGS.items():
+        if d in domain: config = cfg; break
+    if not config: return None
+    items = []
+    cards = soup.select(config["card"])
+    print(f"Found {len(cards)} items on {domain}", file=sys.stderr)
+    for card in cards:
+        try:
+            item = {}
+            name_el = card.select_one(config["name"])
+            if name_el:
+                item["name"] = name_el.get_text().strip()
+                if not item.get("url"): item["url"] = name_el.get("href")
+            if config.get("url") and not item.get("url"):
+                 url_el = card.select_one(config["url"])
+                 if url_el: item["url"] = url_el.get("href")
+            price_el = card.select_one(config["price"])
+            if price_el:
+                val = price_el.get_text().strip()
+                item["price"] = val
+                item["priceAmount"] = parse_price(val)
+            if config.get("img"):
+                img_el = card.select_one(config["img"])
+                if img_el: item["image"] = img_el.get("src") or img_el.get("data-src")
+            if config.get("reference"):
+                ref_el = card.select_one(config["reference"])
+                if ref_el: item["reference"] = ref_el.get_text().strip().strip('[]')
+            if not item.get("reference") and item.get("url"):
+                url_ref = extract_reference_from_url(item.get("url"), domain)
+                if url_ref: item["reference"] = url_ref
+            if item.get("name") and item.get("url"):
+                items.append(item)
+        except Exception as e:
+            print(f"Error parsing card: {e}", file=sys.stderr); continue
     
-    domain = urllib.parse.urlparse(url).netloc
+    # ------------------
+    # ACTUAL FILTERING
+    # ------------------
+    if min_price or max_price or name_filter or reference_filter:
+        print(f"DEBUG: Filtering {len(items)} items...", file=sys.stderr)
+        if name_filter: print(f"DEBUG: Name Filter: {name_filter}", file=sys.stderr)
+        if reference_filter: print(f"DEBUG: Ref Filter: {reference_filter}", file=sys.stderr)
+
+    final_items = []
     
-    response = requests.get(url, headers=headers, timeout=15)
-    response.raise_for_status()
-    
-    soup = BeautifulSoup(response.text, 'html.parser')
-    
-    specific_data = extract_specific_data(soup, domain)
-    
-    data = {
-        "title": soup.title.string.strip() if soup.title else "",
-        "metaDescription": "",
-        "h1": [h1.get_text().strip() for h1 in soup.find_all('h1')],
-        "method": "static",
-        "timestamp": datetime.datetime.now().isoformat(),
-        "domain": domain
-    }
-    
-    if specific_data:
-        data.update(specific_data)
-    
-    desc = soup.find('meta', attrs={'name': 'description'})
-    if desc:
-        data["metaDescription"] = desc.get('content', '')
+    for item in items:
+        valid = True
         
-    return data
+        # Price Filter
+        if min_price is not None or max_price is not None:
+             p_val = item.get("priceAmount", 0.0) or 0.0
+             if min_price is not None and p_val < min_price: valid = False
+             if max_price is not None and p_val > max_price: valid = False
+        
+        if not valid: 
+            # print(f"DEBUG: Dropped price {item.get('priceAmount')}", file=sys.stderr)
+            continue
 
-def scrape_selenium(url):
+        # Name Filter (Substring match)
+        if name_filter:
+            name = (item.get("name") or "").lower()
+            if name_filter not in name: valid = False
+            
+        if not valid: 
+            # print(f"DEBUG: Dropped name {item.get('name')}", file=sys.stderr)
+            continue
+            
+        # Reference Filter (Substring match in Reference OR Name to be robust)
+        if reference_filter:
+            ref = (item.get("reference") or "").lower()
+            name = (item.get("name") or "").lower()
+            if reference_filter not in ref and reference_filter not in name: 
+                valid = False
+            
+        if valid: final_items.append(item)
+
+    if min_price or max_price or name_filter or reference_filter:
+        print(f"Filtered from {len(items)} to {len(final_items)} items matching criteria", file=sys.stderr)
+        return final_items
+        
+    return items
+
+def scrape_static(start_url, min_price=None, max_price=None, name_filter=None, reference_filter=None):
+    print(f"Using Static Scraper for: {start_url}", file=sys.stderr)
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    domain = urllib.parse.urlparse(start_url).netloc
+    config = None
+    for d, cfg in LIST_CONFIGS.items():
+        if d in domain: config = cfg; break
+    all_list_data = []
+    current_url = start_url
+    visited_urls = set()
+    page_count = 0
+    MAX_PAGES = 50
+    while current_url and current_url not in visited_urls and page_count < MAX_PAGES:
+        print(f"Scraping page {page_count + 1}: {current_url}", file=sys.stderr)
+        visited_urls.add(current_url)
+        try:
+            response = requests.get(current_url, headers=headers, timeout=15, verify=False)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+            list_data = extract_list_data(soup, domain, min_price, max_price, name_filter, reference_filter)
+            if list_data is not None:
+                all_list_data.extend(list_data)
+                page_count += 1
+                current_url = None
+                if config and config.get("next"):
+                    next_el = soup.select_one(config["next"])
+                    if next_el and next_el.get("href"):
+                        current_url = urllib.parse.urljoin(start_url, next_el.get("href"))
+            else:
+                if page_count == 0:
+                     if min_price or max_price or name_filter or reference_filter: return None
+                     specific_data = extract_specific_data(soup, domain)
+                     data = {"title": soup.title.string.strip() if soup.title else "", "method": "static", "timestamp": datetime.datetime.now().isoformat(), "domain": domain, "type": "single"}
+                     if specific_data: data.update(specific_data)
+                     return data
+                else: break
+        except Exception as e:
+            print(f"Error scraping {current_url}: {e}", file=sys.stderr); break
+    if all_list_data:
+         return {"type": "list", "data": all_list_data, "domain": domain, "url": start_url, "timestamp": datetime.datetime.now().isoformat()}
+    return None
+
+def scrape_selenium(url, min_price=None, max_price=None, name_filter=None, reference_filter=None):
     print(f"Using Selenium Scraper for: {url}", file=sys.stderr)
     chrome_options = Options()
-    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option('useAutomationExtension', False)
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-    
+    chrome_options.add_argument("--window-size=1920,1080")
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=chrome_options)
-    
+    all_list_data = []
+    page_count = 0
+    MAX_PAGES = 10
     try:
-        driver.get(url)
-        time.sleep(5)
-        
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
         domain = urllib.parse.urlparse(url).netloc
-        specific_data = extract_specific_data(soup, domain)
-        
-        data = {
-            "title": driver.title,
-            "metaDescription": "",
-            "method": "selenium",
-            "timestamp": datetime.datetime.now().isoformat(),
-            "domain": domain
-        }
-        
-        if specific_data:
-            data.update(specific_data)
-            
-        try:
-            desc = driver.find_element("xpath", "//meta[@name='description']")
-            data["metaDescription"] = desc.get_attribute("content")
-        except:
-            pass
-            
-        return data
+        driver.get(url)
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        config = None
+        for d, cfg in LIST_CONFIGS.items():
+            if d in domain: config = cfg; break
+        while page_count < MAX_PAGES:
+            print(f"Scraping page {page_count + 1}: {driver.current_url}", file=sys.stderr)
+            try:
+                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+            except: break
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2)")
+            time.sleep(1.5)
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+            time.sleep(1.5)
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            list_data = extract_list_data(soup, domain, min_price, max_price, name_filter, reference_filter)
+            if list_data is not None:
+                all_list_data.extend(list_data)
+                page_count += 1
+                if config and config.get("next"):
+                    try:
+                        next_btns = driver.find_elements(By.CSS_SELECTOR, config["next"])
+                        if next_btns and next_btns[0].is_displayed():
+                            driver.execute_script("arguments[0].scrollIntoView(true);", next_btns[0])
+                            time.sleep(1)
+                            driver.execute_script("arguments[0].click();", next_btns[0])
+                            time.sleep(3)
+                        else: break
+                    except: break
+                else: break
+            else:
+                if page_count == 0:
+                     if min_price or max_price or name_filter or reference_filter: return None
+                     specific_data = extract_specific_data(soup, domain)
+                     data = {"title": driver.title, "method": "selenium", "timestamp": datetime.datetime.now().isoformat(), "domain": domain, "type": "single"}
+                     if specific_data: data.update(specific_data)
+                     return data
+                else: break
+        if all_list_data:
+             return {"type": "list", "data": all_list_data, "domain": domain, "url": url, "timestamp": datetime.datetime.now().isoformat()}
+        return None
     finally:
         driver.quit()
 
 def main():
-    if len(sys.argv) < 2:
-        print(json.dumps({"error": "No website ID or URL provided"}))
-        return
-
-    website_id_or_url = sys.argv[1]
-    mode = sys.argv[2] if len(sys.argv) > 2 else "auto" 
-    target_url = sys.argv[3] if len(sys.argv) > 3 else None
-
-    db = get_db()
-    
-    url = target_url or website_id_or_url
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('website_id')
+    parser.add_argument('mode', nargs='?', default='auto')
+    parser.add_argument('url', nargs='?')
+    parser.add_argument('--minPrice', type=float)
+    parser.add_argument('--maxPrice', type=float)
+    parser.add_argument('--nameFilter', type=str)
+    parser.add_argument('--referenceFilter', type=str)
+    args = parser.parse_args()
+    min_price = args.minPrice
+    max_price = args.maxPrice
+    name_filter = args.nameFilter.lower() if args.nameFilter else None
+    reference_filter = args.referenceFilter.lower() if args.referenceFilter else None
+    databases = get_appwrite_client()
+    url = args.url or args.website_id
     website_id = None
-    
-    if db is not None:
-        websites_col = db['websites']
-        if len(website_id_or_url) == 24: # Hex OID length
-            try:
-                website = websites_col.find_one({"_id": ObjectId(website_id_or_url)})
-                if website:
-                    if not target_url:
-                        url = website['url']
-                    website_id = website_id_or_url
-            except:
-                pass
-
+    if databases is not None:
+        try:
+            website = databases.get_document(APPWRITE_DB_ID, APPWRITE_COLLECTION_WEBSITES, args.website_id)
+            if website:
+                if not args.url: url = website['url']
+                website_id = website['$id']
+        except: pass
     try:
         scraped_data = None
-        
-        # Determine mode if 'auto'
-        if mode == "auto":
+        if args.mode == "auto":
             if "wiki.tn" in url or "mytek.tn" in url:
-                try:
-                    scraped_data = scrape_static(url)
-                except:
-                    scraped_data = scrape_selenium(url)
+                scraped_data = scrape_selenium(url, min_price, max_price, name_filter, reference_filter)
             else:
-                scraped_data = scrape_static(url)
-        elif mode == "selenium":
-            scraped_data = scrape_selenium(url)
+                try: scraped_data = scrape_static(url, min_price, max_price, name_filter, reference_filter)
+                except: scraped_data = scrape_selenium(url, min_price, max_price, name_filter, reference_filter)
+        elif args.mode == "selenium":
+            scraped_data = scrape_selenium(url, min_price, max_price, name_filter, reference_filter)
         else:
-            scraped_data = scrape_static(url)
-
-        # 1. Update the 'websites' collection with the latest scrape summary
-        if db is not None and website_id:
-            websites_col = db['websites']
-            websites_col.update_one(
-                {"_id": ObjectId(website_id)},
-                {
-                    "$set": {
-                        "scrapedData": scraped_data,
-                        "lastScraped": datetime.datetime.now(),
-                        "updatedAt": datetime.datetime.now()
-                    }
-                }
-            )
-            
-            # 2. Save/Update the detailed product in the 'products' collection
-            # We use 'products' collection in the same database (express-demo)
-            # as per standard Express/Mongoose patterns, but identifying it as 'products'
-            products_col = db['products']
-            product_doc = {
-                "name": scraped_data.get("name", "Unknown"),
-                "price": scraped_data.get("price", "Not found"),
-                "reference": scraped_data.get("reference", "Not found"),
-                "overview": scraped_data.get("overview", "Not found"),
-                "category": scraped_data.get("category", "Not found"),
-                "url": url,
-                "domain": scraped_data.get("domain", ""),
-                "websiteId": ObjectId(website_id),
-                "scrapedAt": datetime.datetime.now()
-            }
-            
-            # Update if exists (by URL), otherwise insert
-            products_col.update_one(
-                {"url": url},
-                {"$set": product_doc},
-                upsert=True
-            )
-        
+            scraped_data = scrape_static(url, min_price, max_price, name_filter, reference_filter)
+        if not scraped_data:
+            if min_price or max_price or name_filter or reference_filter:
+                print(json.dumps({"success": True, "data": {"type": "list", "data": [], "count": 0, "domain": urllib.parse.urlparse(url).netloc, "url": url, "timestamp": datetime.datetime.now().isoformat()}}))
+            else:
+                print(json.dumps({"error": "No data scraped"}))
+            return
+        if databases is not None and website_id is not None:
+            summary = scraped_data
+            if scraped_data.get("type") == "list":
+                 summary = {"type": "list", "count": len(scraped_data["data"]), "url": url, "timestamp": scraped_data["timestamp"]}
+            databases.update_document(APPWRITE_DB_ID, APPWRITE_COLLECTION_WEBSITES, website_id, {"scrapedData": json.dumps(summary), "lastScraped": datetime.datetime.now().isoformat()})
+            items = scraped_data["data"] if scraped_data.get("type") == "list" else [scraped_data]
+            for item in items:
+                try:
+                    p_url = item.get("url", url)
+                    p_doc = {"name": item.get("name", "Unknown"), "price": item.get("price", "Not found"), "priceAmount": float(item.get("priceAmount", 0.0)), "reference": item.get("reference", "Not found"), "overview": item.get("overview", "Not found"), "category": item.get("category", "Not found"), "url": p_url, "domain": item.get("domain") or scraped_data.get("domain", ""), "websiteId": str(website_id), "scrapedAt": datetime.datetime.now().isoformat()}
+                    ex = databases.list_documents(APPWRITE_DB_ID, APPWRITE_COLLECTION_PRODUCTS, [Query.equal("url", p_url)])
+                    if ex['total'] > 0:
+                        databases.update_document(APPWRITE_DB_ID, APPWRITE_COLLECTION_PRODUCTS, ex['documents'][0]['$id'], p_doc)
+                    else:
+                        databases.create_document(APPWRITE_DB_ID, APPWRITE_COLLECTION_PRODUCTS, ID.unique(), p_doc)
+                except: pass
         print(json.dumps({"success": True, "data": scraped_data}))
-
     except Exception as e:
         print(json.dumps({"error": str(e)}))
 
