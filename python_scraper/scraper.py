@@ -1,4 +1,6 @@
 import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), 'libs'))
 import json
 import time
 import requests
@@ -12,21 +14,15 @@ import urllib.parse
 import re
 import os
 from dotenv import load_dotenv
-from appwrite.client import Client
-from appwrite.services.databases import Databases
-from appwrite.query import Query
-from appwrite.id import ID
+from supabase import create_client, Client
 
 # Load environment variables
+# Try loading from backend .env
 load_dotenv(os.path.join(os.path.dirname(__file__), '../.env'))
 
 # Configuration
-APPWRITE_ENDPOINT = os.getenv('APPWRITE_ENDPOINT')
-APPWRITE_PROJECT_ID = os.getenv('APPWRITE_PROJECT_ID')
-APPWRITE_API_KEY = os.getenv('APPWRITE_API_KEY')
-APPWRITE_DB_ID = os.getenv('APPWRITE_DB_ID')
-APPWRITE_COLLECTION_WEBSITES = os.getenv('APPWRITE_COLLECTION_WEBSITES', 'websites')
-APPWRITE_COLLECTION_PRODUCTS = os.getenv('APPWRITE_COLLECTION_PRODUCTS', 'products')
+SUPABASE_URL = os.getenv('SUPABASE_URL') or os.getenv('NEXT_PUBLIC_SUPABASE_URL')
+SUPABASE_KEY = os.getenv('SUPABASE_SERVICE_ROLE_KEY') or os.getenv('NEXT_PUBLIC_SUPABASE_ANON_KEY')
 
 SITE_CONFIGS = {
     "tunisianet.com.tn": {
@@ -167,16 +163,14 @@ def extract_reference_from_url(url, domain):
         pass
     return ref
 
-def get_appwrite_client():
+def get_supabase_client():
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        print("Error: SUPABASE_URL or SUPABASE_KEY not found in environment variables.", file=sys.stderr)
+        return None
     try:
-        client = Client()
-        client.set_endpoint(APPWRITE_ENDPOINT)
-        client.set_project(APPWRITE_PROJECT_ID)
-        client.set_key(APPWRITE_API_KEY)
-        databases = Databases(client)
-        return databases
+        return create_client(SUPABASE_URL, SUPABASE_KEY)
     except Exception as e:
-        print(f"Error connecting to Appwrite: {e}", file=sys.stderr)
+        print(f"Error connecting to Supabase: {e}", file=sys.stderr)
         return None
 
 def extract_specific_data(soup, domain):
@@ -303,7 +297,6 @@ def extract_list_data(soup, domain, min_price=None, max_price=None, name_filter=
              if max_price is not None and p_val > max_price: valid = False
         
         if not valid: 
-            # print(f"DEBUG: Dropped price {item.get('priceAmount')}", file=sys.stderr)
             continue
 
         # Name Filter (Substring match)
@@ -312,7 +305,6 @@ def extract_list_data(soup, domain, min_price=None, max_price=None, name_filter=
             if name_filter not in name: valid = False
             
         if not valid: 
-            # print(f"DEBUG: Dropped name {item.get('name')}", file=sys.stderr)
             continue
             
         # Reference Filter (Substring match in Reference OR Name to be robust)
@@ -323,7 +315,7 @@ def extract_list_data(soup, domain, min_price=None, max_price=None, name_filter=
                 valid = False
             
         if valid: final_items.append(item)
-
+    
     if min_price or max_price or name_filter or reference_filter:
         print(f"Filtered from {len(items)} to {len(final_items)} items matching criteria", file=sys.stderr)
         return final_items
@@ -447,16 +439,23 @@ def main():
     max_price = args.maxPrice
     name_filter = args.nameFilter.lower() if args.nameFilter else None
     reference_filter = args.referenceFilter.lower() if args.referenceFilter else None
-    databases = get_appwrite_client()
+    
+    supabase = get_supabase_client()
     url = args.url or args.website_id
     website_id = None
-    if databases is not None:
-        try:
-            website = databases.get_document(APPWRITE_DB_ID, APPWRITE_COLLECTION_WEBSITES, args.website_id)
-            if website:
-                if not args.url: url = website['url']
-                website_id = website['$id']
-        except: pass
+    
+    if supabase and not args.url:
+         # Fetch website URL from Supabase if not provided
+         try:
+             response = supabase.table('Website').select('*').eq('id', args.website_id).single().execute()
+             if response.data:
+                 website = response.data
+                 url = website['url']
+                 website_id = website['id']
+         except Exception as e:
+             # print(f"Website fetch error: {e}", file=sys.stderr)
+             pass
+
     try:
         scraped_data = None
         if args.mode == "auto":
@@ -475,22 +474,53 @@ def main():
             else:
                 print(json.dumps({"error": "No data scraped"}))
             return
-        if databases is not None and website_id is not None:
+
+        if supabase and website_id:
             summary = scraped_data
             if scraped_data.get("type") == "list":
                  summary = {"type": "list", "count": len(scraped_data["data"]), "url": url, "timestamp": scraped_data["timestamp"]}
-            databases.update_document(APPWRITE_DB_ID, APPWRITE_COLLECTION_WEBSITES, website_id, {"scrapedData": json.dumps(summary), "lastScraped": datetime.datetime.now().isoformat()})
+            
+            # Update Website with last scrape data
+            supabase.table('Website').update({
+                "scrapedData": json.dumps(summary),
+                "lastScraped": datetime.datetime.now().isoformat()
+            }).eq('id', website_id).execute()
+
             items = scraped_data["data"] if scraped_data.get("type") == "list" else [scraped_data]
             for item in items:
                 try:
                     p_url = item.get("url", url)
-                    p_doc = {"name": item.get("name", "Unknown"), "price": item.get("price", "Not found"), "priceAmount": float(item.get("priceAmount", 0.0)), "reference": item.get("reference", "Not found"), "overview": item.get("overview", "Not found"), "category": item.get("category", "Not found"), "url": p_url, "domain": item.get("domain") or scraped_data.get("domain", ""), "websiteId": str(website_id), "scrapedAt": datetime.datetime.now().isoformat()}
-                    ex = databases.list_documents(APPWRITE_DB_ID, APPWRITE_COLLECTION_PRODUCTS, [Query.equal("url", p_url)])
-                    if ex['total'] > 0:
-                        databases.update_document(APPWRITE_DB_ID, APPWRITE_COLLECTION_PRODUCTS, ex['documents'][0]['$id'], p_doc)
+                    p_doc = {
+                        "name": item.get("name", "Unknown"),
+                        "price": item.get("price", "Not found"),
+                        "priceAmount": float(item.get("priceAmount", 0.0)),
+                        "reference": item.get("reference", "Not found"),
+                        "overview": item.get("overview", "Not found"),
+                        "category": item.get("category", "Not found"),
+                        "url": p_url,
+                        "domain": item.get("domain") or scraped_data.get("domain", ""),
+                        "websiteId": website_id,
+                        "scrapedAt": datetime.datetime.now().isoformat()
+                    }
+                    
+                    # Upsert product
+                    # Check if exists by URL
+                    # Note: upsert in Supabase usually requires conflict on unique constraint.
+                    # Assuming 'url' is unique in Product schema? 
+                    # Checking schema: URL is NOT unique in Product model! 
+                    # "url String" in Model Product.
+                    # So we must search first.
+                    
+                    existing = supabase.table('Product').select('id').eq('url', p_url).execute()
+                    if existing.data and len(existing.data) > 0:
+                        supabase.table('Product').update(p_doc).eq('id', existing.data[0]['id']).execute()
                     else:
-                        databases.create_document(APPWRITE_DB_ID, APPWRITE_COLLECTION_PRODUCTS, ID.unique(), p_doc)
-                except: pass
+                        supabase.table('Product').insert(p_doc).execute()
+                        
+                except Exception as e:
+                    # print(f"Product save error: {e}", file=sys.stderr)
+                    pass
+                    
         print(json.dumps({"success": True, "data": scraped_data}))
     except Exception as e:
         print(json.dumps({"error": str(e)}))

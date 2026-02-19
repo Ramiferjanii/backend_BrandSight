@@ -1,6 +1,54 @@
 const express = require('express');
 const router = express.Router();
-const { users, Query } = require('../services/appwriteService');
+const { supabase } = require('../services/supabaseService');
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
+
+// Sync User from Supabase Auth to Public User Table
+router.post('/sync-user', async (req, res) => {
+    const { id, email, name, full_name } = req.body;
+    
+    if (!id || !email) {
+        return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    try {
+        // Check if user exists by email first (to handle email conflicts)
+        let existingUser = await prisma.user.findUnique({ where: { email } });
+        
+        if (!existingUser) {
+            // Then check by ID
+            existingUser = await prisma.user.findUnique({ where: { id } });
+        }
+
+        let user;
+        if (existingUser) {
+            // Update existing user
+            user = await prisma.user.update({
+                where: { id: existingUser.id },
+                data: {
+                    email: email,
+                    name: name || full_name || email.split('@')[0],
+                    // We keep usage of existingUser.id, even if request 'id' is different
+                },
+            });
+        } else {
+            // Create new user
+            user = await prisma.user.create({
+                data: {
+                    id: id,
+                    email: email,
+                    name: name || full_name || email.split('@')[0],
+                },
+            });
+        }
+        console.log(`[AUTH] Synced user: ${user.id}`);
+        res.json({ success: true, user });
+    } catch (error) {
+        console.error("[AUTH] Error syncing user:", error);
+        res.status(500).json({ error: "Failed to sync user" });
+    }
+});
 
 // Debug Middleware to trace Auth Requests
 router.use((req, res, next) => {
@@ -15,13 +63,14 @@ router.post('/get-user-id', async (req, res) => {
     if (!email) return res.status(400).json({ error: "Email is required" });
 
     try {
-        const response = await users.list([
-            Query.equal('email', email)
-        ]);
+        const { data: { users }, error } = await supabase.auth.admin.listUsers();
+        if (error) throw error;
 
-        if (response.users.length > 0) {
-            console.log(`[AUTH] User found: ${response.users[0].$id}`);
-            return res.json({ userId: response.users[0].$id, exists: true });
+        const user = users.find(u => u.email === email);
+
+        if (user) {
+            console.log(`[AUTH] User found: ${user.id}`);
+            return res.json({ userId: user.id, exists: true });
         } else {
             console.log(`[AUTH] User not found for email: ${email}`);
             return res.status(404).json({ error: "User not found", exists: false });

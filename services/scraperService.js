@@ -1,15 +1,11 @@
 const { spawn } = require('child_process');
 const path = require('path');
-const { databases, ID } = require('../services/appwriteService');
-const { Query } = require('node-appwrite');
-
-const DATABASE_ID = process.env.APPWRITE_DB_ID;
-const WEBSITES_COLLECTION = process.env.APPWRITE_COLLECTION_WEBSITES;
-const PRODUCTS_COLLECTION = process.env.APPWRITE_COLLECTION_PRODUCTS;
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
 
 /**
  * Scrapes a website using the Python scraper script.
- * @param {string} websiteId - The Document ID of the website in Appwrite
+ * @param {string} websiteId - The ID of the website
  * @param {string} mode - 'static' or 'selenium'
  * @returns {Promise<Object>} - The updated data
  */
@@ -53,7 +49,6 @@ async function scrapeWebsiteTask(websiteId, mode = 'static', url, filters = {}, 
 
         pythonProcess.on('error', async (err) => {
             console.error('Failed to start Python process:', err);
-            // Status tracking removed - field doesn't exist in schema
             reject(new Error(`Failed to start Python process: ${err.message}`));
         });
 
@@ -71,111 +66,151 @@ async function scrapeWebsiteTask(websiteId, mode = 'static', url, filters = {}, 
         });
 
         pythonProcess.on('close', async (code) => {
+            console.log(`Python process for ${websiteId} exited with code ${code}`);
+            
             if (code !== 0) {
-                console.error(`Python stderr: ${errorOutput}`);
-                // Status tracking removed
+                console.error(`Python stderr for ${websiteId}: ${errorOutput}`);
                 return reject(new Error(`Python process exited with code ${code}. Error: ${errorOutput}`));
             }
 
             try {
-                // Find the JSON line in the output
+                // More robust JSON detection: Find the last line that looks like a JSON object
                 const lines = output.trim().split('\n');
                 let result = null;
 
                 for (let i = lines.length - 1; i >= 0; i--) {
-                    try {
-                        result = JSON.parse(lines[i]);
-                        break;
-                    } catch (e) { continue; }
+                    const line = lines[i].trim();
+                    if (line.startsWith('{') && line.endsWith('}')) {
+                        try {
+                            result = JSON.parse(line);
+                            if (result.data || result.error || result.success) break;
+                        } catch (e) { continue; }
+                    }
                 }
 
-                if (result && result.error) {
-                    // Status tracking removed
-                    return reject(new Error(result.error));
-                }
-
-                if (!result || !result.data) {
-                    // Status tracking removed
+                if (!result) {
+                    console.error(`Full Python Output for ${websiteId}:\n${output}`);
                     throw new Error('No valid JSON output found from Python script');
                 }
 
-                const data = result.data;
-                const items = (data.type === 'list' && Array.isArray(data.data)) ? data.data : [data];
+                if (result.error) {
+                    return reject(new Error(result.error));
+                }
+
+                const data = result.data || result; // Handle {success: true, data: ...} or just data
                 
-                // Add count to the data for frontend display
+                // Extract items
+                let items = [];
+                if (data.type === 'list' && Array.isArray(data.data)) {
+                    items = data.data;
+                } else if (Array.isArray(data)) {
+                    items = data;
+                } else {
+                    items = [data];
+                }
+                
+                // Add count to the data for website summary
                 if (data.type === 'list') {
                     data.count = items.length;
                 }
                 
-                console.log(`Scraper returned ${items.length} items`);
+                console.log(`[SCRAPER] ${websiteId}: Found ${items.length} items to save.`);
 
-                // 2. Update Website Document in Appwrite (Success)
-                const now = new Date().toISOString();
-                await databases.updateDocument(
-                    DATABASE_ID,
-                    WEBSITES_COLLECTION,
-                    websiteId,
-                    {
-                        scrapedData: JSON.stringify(data),
+                // 2. Update Website Document using Prisma (Success)
+                const now = new Date();
+                await prisma.website.update({
+                    where: { id: websiteId },
+                    data: {
+                        scrapedData: data,
                         lastScraped: now
                     }
-                );
+                });
 
-                // 3. Create/Update Product in Appwrite
+                // 3. Create/Update Product using Prisma
+                let savedCount = 0;
                 for (const item of items) {
                     try {
                         let itemUrl = item.url || url;
-                        if (!itemUrl) continue;
+                        if (!itemUrl || typeof itemUrl !== 'string') continue;
                         
-                        // Upsert logic
-                        const existingProducts = await databases.listDocuments(
-                            DATABASE_ID,
-                            PRODUCTS_COLLECTION,
-                            [Query.equal('url', itemUrl)] 
-                        );
+                        // Manual upsert logic
+                        const existingProduct = await prisma.product.findFirst({
+                            where: { 
+                                url: itemUrl,
+                                userId: userId || undefined
+                            }
+                        });
 
-                        const productPayload = {
+
+                        const productData = {
                             name: item.name || 'Unknown',
                             price: item.price || 'Not found',
                             priceAmount: parseFloat(item.priceAmount || 0.0), 
                             reference: item.reference || '',
                             overview: item.overview || '',
                             category: item.category || '',
-                            url: itemUrl,
                             image: item.image || '',
                             websiteId: websiteId,
                             scrapedAt: now,
-                            userId: userId // Data Isolation: Associate with User
+                            userId: userId, 
+                            domain: item.domain || data.domain
                         };
-                        
-                        // Domain fallback
-                        if (item.domain) productPayload.domain = item.domain;
 
-                        if (existingProducts.total > 0) {
-                            const existingId = existingProducts.documents[0].$id;
-                            await databases.updateDocument(
-                                DATABASE_ID,
-                                PRODUCTS_COLLECTION,
-                                existingId,
-                                productPayload
-                            );
+                        if (existingProduct) {
+                            await prisma.product.update({
+                                where: { id: existingProduct.id },
+                                data: productData
+                            });
                         } else {
-                            await databases.createDocument(
-                                DATABASE_ID,
-                                PRODUCTS_COLLECTION,
-                                ID.unique(),
-                                productPayload
-                            );
+                            await prisma.product.create({
+                                data: {
+                                    ...productData,
+                                    url: itemUrl
+                                }
+                            });
                         }
+                        savedCount++;
                     } catch (err) {
-                        console.error(`Failed to save item ${item.name}:`, err.message);
+                        console.error(`[SCRAPER] Failed to save item "${item.name}":`, err.message);
                     }
                 }
 
+                console.log(`[SCRAPER] ${websiteId}: Successfully saved ${savedCount} products to database.`);
+                
+                // --- Notification & Email System ---
+                if (userId) {
+                    try {
+                        const { sendScrapingNotification } = require('./emailService');
+                        const user = await prisma.user.findUnique({
+                            where: { id: userId },
+                            select: { email: true }
+                        });
+                        
+                        // 1. Create In-App Notification
+                        await prisma.notification.create({
+                            data: {
+                                userId: userId,
+                                title: "Scraping Completed",
+                                message: `Successfully scraped ${items.length} items from ${url}`,
+                                type: "success"
+                            }
+                        });
+                        console.log(`[Notification] Created in-app notification for user ${userId}`);
+
+                        // 2. Send Email
+                        if (user && user.email) {
+                            console.log(`Sending email notification to ${user.email}...`);
+                            await sendScrapingNotification(user.email, url, items.length);
+                        }
+                    } catch (notifyErr) {
+                         console.error("Failed to process notifications:", notifyErr);
+                    }
+                }
+                // --- End Notification System ---
+
                 resolve(data);
             } catch (err) {
-                console.error('Failed to parse/save Python output:', err);
-                // Status tracking removed
+                console.error(`[SCRAPER] Error processing output for ${websiteId}:`, err);
                 reject(new Error(`Failed to process scraper results: ${err.message}`));
             }
         });
@@ -185,3 +220,4 @@ async function scrapeWebsiteTask(websiteId, mode = 'static', url, filters = {}, 
 module.exports = {
     scrapeWebsiteTask
 };
+

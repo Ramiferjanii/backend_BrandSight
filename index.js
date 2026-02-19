@@ -8,9 +8,8 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const authRoutes = require('./routes/auth.js');
 const websiteRoutes = require('./routes/websites.js');
-// const productRoutes = require('./routes/products.js'); // Migrating to Appwrite
-// require('./database'); // MongoDB connection Disabled (Using Appwrite)
-const port = 5003; // Updated to 5003 to avoid conflicts
+const productRoutes = require('./routes/products.js');
+const port = 5003;
 
 // Middleware
 app.use(cors()); // Enable CORS for all origins
@@ -33,7 +32,7 @@ app.use((req, res, next) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/profile', require('./routes/profile'));
 app.use('/api/websites', websiteRoutes);
-app.use('/api/products', require('./routes/products'));
+app.use('/api/products', productRoutes);
 
 // API Info endpoint
 app.get('/', (req, res) => {

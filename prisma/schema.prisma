@@ -1,0 +1,75 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String    @id @default(uuid())
+  email     String    @unique
+  name      String?
+  password  String?
+  createdAt DateTime  @default(now())
+  products  Product[]
+  websites      Website[]
+  notifications Notification[]
+}
+
+model Website {
+  id              String    @id @default(uuid())
+  name            String
+  url             String    @unique
+  description     String?
+  category        String    @default("general")
+  scrapeFrequency String    @default("on-demand") // daily, weekly, monthly, on-demand
+  isActive        Boolean   @default(true)
+  lastScraped     DateTime?
+  scrapedData     Json?
+  metadata        Json?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  products        Product[]
+  userId          String?
+  user            User?     @relation(fields: [userId], references: [id])
+  @@index([userId])
+}
+
+model Product {
+  id          String    @id @default(uuid())
+  name        String
+  price       String?
+  priceAmount Float?
+  reference   String?
+  overview    String?
+  category    String?
+  url         String
+  image       String?
+  domain      String?
+  websiteId   String
+  website     Website   @relation(fields: [websiteId], references: [id])
+  userId      String?
+  user        User?     @relation(fields: [userId], references: [id])
+  scrapedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([priceAmount])
+  @@index([category])
+  @@index([userId])
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  title     String
+  message   String
+  isRead    Boolean  @default(false)
+  type      String   @default("info") // info, success, warning, error
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}

@@ -1,12 +1,12 @@
 const express = require('express');
 const router = express.Router();
-
-const auth = require('../middleware/auth'); // Check local import
+const { supabase } = require('../services/supabaseService');
+const auth = require('../middleware/auth');
 
 // GET Profile
 router.get('/', auth, async (req, res) => {
     try {
-        // req.user is already populated by the auth middleware via Appwrite
+        // req.user is already populated by the auth middleware
         res.json(req.user);
     } catch (err) {
         console.error(err);
@@ -17,34 +17,31 @@ router.get('/', auth, async (req, res) => {
 // UPDATE Profile
 router.put('/', auth, async (req, res) => {
     const { name, email, password } = req.body;
-    const { users } = require('../services/appwriteService');
 
     try {
-        // Update Name
-        if (name) {
-            await users.updateName(req.user.id, name);
-        }
-        
-        // Update Email
-        if (email) {
-            await users.updateEmail(req.user.id, email);
+        const attributes = {};
+        if (email) attributes.email = email;
+        if (password) attributes.password = password;
+        if (name) attributes.user_metadata = { ...req.user.user_metadata, name };
+
+        if (Object.keys(attributes).length === 0) {
+             return res.status(400).json({ error: 'No fields to update' });
         }
 
-        // Update Password
-        if (password) {
-            await users.updatePassword(req.user.id, password);
-        }
+        const { data: { user }, error } = await supabase.auth.admin.updateUserById(
+            req.user.id,
+            attributes
+        );
 
-        // Fetch updated user to return
-        const updatedUser = await users.get(req.user.id);
+        if (error) throw error;
 
         res.json({
             message: 'Profile updated successfully',
             user: {
-                id: updatedUser.$id,
-                name: updatedUser.name,
-                email: updatedUser.email,
-                ...updatedUser
+                id: user.id,
+                email: user.email,
+                name: user.user_metadata?.name,
+                ...user.user_metadata
             }
         });
     } catch (err) {
@@ -54,3 +51,4 @@ router.put('/', auth, async (req, res) => {
 });
 
 module.exports = router;
+

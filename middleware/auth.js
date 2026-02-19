@@ -1,5 +1,4 @@
-const { Client, Account } = require('node-appwrite');
-require('dotenv').config();
+const { supabase } = require('../services/supabaseService');
 
 module.exports = async function(req, res, next) {
     const token = req.header('Authorization')?.replace('Bearer ', '');
@@ -9,21 +8,16 @@ module.exports = async function(req, res, next) {
     }
 
     try {
-        const client = new Client()
-            .setEndpoint(process.env.APPWRITE_ENDPOINT)
-            .setProject(process.env.APPWRITE_PROJECT_ID)
-            .setJWT(token);
+        const { data: { user }, error } = await supabase.auth.getUser(token);
 
-        const account = new Account(client);
-        const user = await account.get();
+        if (error || !user) {
+            throw new Error(error?.message || 'Invalid token');
+        }
         
-        // Populate req.user with Appwrite User object
-        // Map $id to id for compatibility
         req.user = { 
-            id: user.$id, 
+            id: user.id, 
             email: user.email, 
-            name: user.name, 
-            ...user 
+            ...user.user_metadata 
         };
         
         next();
@@ -32,3 +26,4 @@ module.exports = async function(req, res, next) {
         res.status(401).json({ error: 'Invalid token or session expired.' });
     }
 };
+
