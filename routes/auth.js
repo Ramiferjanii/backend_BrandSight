@@ -6,7 +6,7 @@ const prisma = new PrismaClient();
 
 // Sync User from Supabase Auth to Public User Table
 router.post('/sync-user', async (req, res) => {
-    const { id, email, name, full_name } = req.body;
+    const { id, email, name, full_name, image } = req.body;
     
     if (!id || !email) {
         return res.status(400).json({ error: "Missing required fields" });
@@ -29,7 +29,7 @@ router.post('/sync-user', async (req, res) => {
                 data: {
                     email: email,
                     name: name || full_name || email.split('@')[0],
-                    // We keep usage of existingUser.id, even if request 'id' is different
+                    image: image || undefined, // Only update if provided
                 },
             });
         } else {
@@ -39,6 +39,7 @@ router.post('/sync-user', async (req, res) => {
                     id: id,
                     email: email,
                     name: name || full_name || email.split('@')[0],
+                    image: image,
                 },
             });
         }
