@@ -1,6 +1,10 @@
 import sys
 import os
-sys.path.append(os.path.join(os.path.dirname(__file__), 'libs'))
+
+# Only use local libs if explicitly needed or as fallback
+libs_path = os.path.join(os.path.dirname(__file__), 'libs')
+if os.path.exists(libs_path) and os.environ.get('USE_LOCAL_LIBS') == '1':
+    sys.path.append(libs_path)
 import json
 import time
 import requests
@@ -56,7 +60,7 @@ LIST_CONFIGS = {
         "url": ".product-title a",
         "img": ".product-thumbnail img",
         "reference": ".product-reference",
-        "next": "a.next, .pagination a.next, a.js-search-link"
+        "next": "a.next, .pagination a.next, a[aria-label*='Suivant']"
     },
     "mytek.tn": {
         "card": ".product-container",
@@ -65,7 +69,7 @@ LIST_CONFIGS = {
         "url": ".product-item-link",
         "img": "img",
         "reference": ".sku",
-        "next": "a.action.next"
+        "next": "a.action.next, a[aria-label='Next'], .pages a.next"
     },
     "wiki.tn": {
         "card": ".product-miniature, .product-container, .product-type-simple, .product, .product-card, .brxe-loop-item", 
@@ -74,7 +78,7 @@ LIST_CONFIGS = {
         "url": ".product-title a, .product-name, .woocommerce-loop-product__link, .product-card__title a",
         "img": "img",
         "reference": ".sku, .product-reference",
-        "next": "a.next, .brxe-pagination a.next"
+        "next": "a.next, .brxe-pagination a.next, a[aria-label*='Suivant']"
     }
 }
 
@@ -421,12 +425,27 @@ def scrape_selenium(url, min_price=None, max_price=None, name_filter=None, refer
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
+    chrome_options.add_argument("--blink-settings=imagesEnabled=false")
+    
+    # Silence webdriver logging
+    import logging
+    from selenium.webdriver.remote.remote_connection import LOGGER
+    LOGGER.setLevel(logging.WARNING)
+    
+    try:
+        driver = webdriver.Chrome(options=chrome_options)
+    except Exception as e:
+        print(f"Default Selenium launch failed ({e}), trying with webdriver-manager...", file=sys.stderr)
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        
+    driver.set_page_load_timeout(45)
+    
     all_list_data = []
     page_count = 0
-    MAX_PAGES = 10
+    MAX_PAGES = 5  # Reduced to avoid backend timeouts
     try:
         domain = urllib.parse.urlparse(url).netloc
         driver.get(url)
