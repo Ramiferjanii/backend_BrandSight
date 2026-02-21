@@ -56,7 +56,7 @@ LIST_CONFIGS = {
         "url": ".product-title a",
         "img": ".product-thumbnail img",
         "reference": ".product-reference",
-        "next": "a.next"
+        "next": "a.next, .pagination a.next, a.js-search-link"
     },
     "mytek.tn": {
         "card": ".product-container",
@@ -322,8 +322,8 @@ def extract_list_data(soup, domain, min_price=None, max_price=None, name_filter=
         
     return items
 
-def scrape_static(start_url, min_price=None, max_price=None, name_filter=None, reference_filter=None):
-    print(f"Using Static Scraper for: {start_url}", file=sys.stderr)
+def scrape_static(start_url, min_price=None, max_price=None, name_filter=None, reference_filter=None, max_pages=50):
+    print(f"Using Static Scraper for: {start_url} (Max Pages: {max_pages})", file=sys.stderr)
     headers = {'User-Agent': 'Mozilla/5.0'}
     domain = urllib.parse.urlparse(start_url).netloc
     config = None
@@ -333,15 +333,23 @@ def scrape_static(start_url, min_price=None, max_price=None, name_filter=None, r
     current_url = start_url
     visited_urls = set()
     page_count = 0
-    MAX_PAGES = 50
+    MAX_PAGES = max_pages
     while current_url and current_url not in visited_urls and page_count < MAX_PAGES:
+        last_url = current_url
         print(f"Scraping page {page_count + 1}: {current_url}", file=sys.stderr)
+
         visited_urls.add(current_url)
         try:
             response = requests.get(current_url, headers=headers, timeout=15, verify=False)
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
             list_data = extract_list_data(soup, domain, min_price, max_price, name_filter, reference_filter)
+            
+            # Check if there are ANY products on the page (ignoring filters) to decide whether to continue
+            has_any_products = False
+            if config and config.get("card"):
+                has_any_products = len(soup.select(config["card"])) > 0
+                
             if list_data is not None:
                 all_list_data.extend(list_data)
                 page_count += 1
@@ -349,7 +357,50 @@ def scrape_static(start_url, min_price=None, max_price=None, name_filter=None, r
                 if config and config.get("next"):
                     next_el = soup.select_one(config["next"])
                     if next_el and next_el.get("href"):
-                        current_url = urllib.parse.urljoin(start_url, next_el.get("href"))
+                        next_href = next_el.get("href")
+                        # Preserving filters: if next_href is just ?page=X, we should merge with last_url's other params
+                        if next_href.startswith('?'):
+                            parsed_current = urllib.parse.urlparse(last_url)
+                            current_params = urllib.parse.parse_qs(parsed_current.query)
+                            next_params = urllib.parse.parse_qs(next_href[1:])
+                            
+                            # Merge params, but next_params takes precedence (for page number)
+                            merged_params = current_params.copy()
+                            for k, v in next_params.items():
+                                merged_params[k] = v
+                                
+                            new_query = urllib.parse.urlencode(merged_params, doseq=True)
+                            current_url = parsed_current._replace(query=new_query).geturl()
+                        else:
+                            current_url = urllib.parse.urljoin(last_url, next_href)
+                        print(f"Found next button: {current_url}", file=sys.stderr)
+
+
+                
+                # If no next button but user wants to "scroll in URL", we can try ?page=N+1
+                if not current_url and "tunisianet.com.tn" in domain:
+                    # Fallback: check if we just scraped items. If yes, try next page manually.
+                    if has_any_products:
+                        parsed_start = urllib.parse.urlparse(start_url)
+                        start_params = urllib.parse.parse_qs(parsed_start.query)
+                        
+                        # Use the URL we just finished scraping
+                        curr_url = last_url
+                        curr_parsed = urllib.parse.urlparse(curr_url)
+                        curr_params = urllib.parse.parse_qs(curr_parsed.query)
+
+                        
+                        try:
+                            curr_page = int(curr_params.get('page', ['1'])[0])
+                            next_page = curr_page + 1
+                            
+                            merged_params = start_params.copy()
+                            merged_params['page'] = [str(next_page)]
+                            new_query = urllib.parse.urlencode(merged_params, doseq=True)
+                            current_url = parsed_start._replace(query=new_query).geturl()
+                            print(f"Manual scroll: moving to page {next_page}", file=sys.stderr)
+                        except:
+                            pass
             else:
                 if page_count == 0:
                      if min_price or max_price or name_filter or reference_filter: return None
@@ -396,6 +447,11 @@ def scrape_selenium(url, min_price=None, max_price=None, name_filter=None, refer
             time.sleep(1.5)
             soup = BeautifulSoup(driver.page_source, 'html.parser')
             list_data = extract_list_data(soup, domain, min_price, max_price, name_filter, reference_filter)
+            
+            has_any_products = False
+            if config and config.get("card"):
+                has_any_products = len(soup.select(config["card"])) > 0
+                
             if list_data is not None:
                 all_list_data.extend(list_data)
                 page_count += 1
@@ -434,11 +490,13 @@ def main():
     parser.add_argument('--maxPrice', type=float)
     parser.add_argument('--nameFilter', type=str)
     parser.add_argument('--referenceFilter', type=str)
+    parser.add_argument('--maxPages', type=int, default=50)
     args = parser.parse_args()
     min_price = args.minPrice
     max_price = args.maxPrice
     name_filter = args.nameFilter.lower() if args.nameFilter else None
     reference_filter = args.referenceFilter.lower() if args.referenceFilter else None
+    max_pages = args.maxPages
     
     supabase = get_supabase_client()
     url = args.url or args.website_id
@@ -465,9 +523,10 @@ def main():
                 try: scraped_data = scrape_static(url, min_price, max_price, name_filter, reference_filter)
                 except: scraped_data = scrape_selenium(url, min_price, max_price, name_filter, reference_filter)
         elif args.mode == "selenium":
+            # (Note: selenium mode currently has its own MAX_PAGES fixed at 10, could update too)
             scraped_data = scrape_selenium(url, min_price, max_price, name_filter, reference_filter)
         else:
-            scraped_data = scrape_static(url, min_price, max_price, name_filter, reference_filter)
+            scraped_data = scrape_static(url, min_price, max_price, name_filter, reference_filter, max_pages=max_pages)
         if not scraped_data:
             if min_price or max_price or name_filter or reference_filter:
                 print(json.dumps({"success": True, "data": {"type": "list", "data": [], "count": 0, "domain": urllib.parse.urlparse(url).netloc, "url": url, "timestamp": datetime.datetime.now().isoformat()}}))
